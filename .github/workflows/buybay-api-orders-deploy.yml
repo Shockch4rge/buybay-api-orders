@@ -19,6 +19,8 @@ jobs:
           key: ${{ secrets.AWS_SSH_KEY }}
           script: |
             cd ~/buybay/buybay-api-orders/
+            mv docker-compose.yml docker-compose.prod.yml
+            mv docker-compose.local.yml docker-compose.yml
             git pull origin main
             mv docker-compose.yml docker-compose.local.yml
             mv docker-compose.prod.yml docker-compose.yml
