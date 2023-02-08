@@ -15,7 +15,7 @@ return new class extends Migration
     {
         Schema::create('orders', function (Blueprint $table) {
             $table->uuid("id")->primary();
-            $table->uuid("buyer_id");
+            $table->uuid("customer_id");
             $table->timestamps();
             $table->softDeletes();
         });

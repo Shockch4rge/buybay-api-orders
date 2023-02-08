@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
+use App\Models\OrderItem;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Stripe\Checkout\Session;
 use Stripe\Exception\ApiErrorException;
@@ -14,7 +17,12 @@ class OrderController extends Controller
 {
     public function userOrders(Request $request, string $id)
     {
-        $orders = Order::query()->where("buyer_id", $id)->get();
+        $orders = Order::query()->where("customer_id", $id)->with(["items"])->get();
+
+        foreach ($orders as $order) {
+            $productIds = $order->items->map(fn ($item) => $item->product_id)->values();
+            $order->products = GetOrderProducts::dispatchSync($productIds);
+        }
 
         return response([
             "message" => "Success",
@@ -24,42 +32,21 @@ class OrderController extends Controller
 
     public function userSales(Request $request, string $id)
     {
-        $orders = Order::query()->where("seller_id", $id)->get();
+        $orderItems = OrderItem::query()->where("seller_id", $id)->with(["order"])->get();
+        $orders = $orderItems->map(fn ($item) => $item->order)->unique("id");
+
+        foreach ($orders as $order) {
+            $productIds = $order->items->map(fn ($item) => $item->product_id)->values();
+            $response = Http::post(env("PRODUCTS_API_URL") . "/products/ids", [
+                "ids" => $productIds,
+            ]);
+            $order->products = $response->json();
+            echo json_encode($response->json());
+        }
 
         return response([
             "message" => "Success",
             "orders" => $orders,
-        ]);
-    }
-
-    public function store(Request $request)
-    {
-        $validation = Validator::make($request->all(), [
-            "buyer_id" => "required|string",
-            "seller_id" => "required|string",
-            "product_id" => "required|string",
-            "created_at" => "required|date",
-            "product_quantity" => "required|numeric",
-        ]);
-
-        if ($validation->fails()) {
-            return response([
-                "message" => "Invalid request",
-                "errors" => $validation->errors(),
-            ], 400);
-        }
-
-        $order = Order::query()->create([
-            "buyer_id" => $request->buyer_id,
-            "seller_id" => $request->seller_id,
-            "product_id" => $request->product_id,
-            "created_at" => $request->purchased_at,
-            "quantity" => $request->quantity,
-        ]);
-
-        return response([
-            "message" => "Order successfully recorded",
-            "order" => $order,
         ]);
     }
 
@@ -82,7 +69,7 @@ class OrderController extends Controller
     public function checkout(Request $request)
     {
         $validation = Validator::make($request->all(), [
-            "buyer_id" => "required|string",
+            "customer_id" => "required|string",
             "products" => "required|array",
             "products.*.purchased_quantity" => "required|numeric",
         ]);
@@ -94,41 +81,49 @@ class OrderController extends Controller
             ], 400);
         }
 
-        $products = array_map(function ($product) {
-            return [
-                "quantity" => $product["purchased_quantity"],
-                "price_data" => [
-                    "currency" => "sgd",
-                    "unit_amount_decimal" => $product["price"] * 100,
-                    "product_data" => [
-                        "name" => $product["name"],
-                        "description" => $product["description"],
-                        "images" => array_map(fn ($image) => $image["url"], $product["images"]),
-                        "metadata" => [
-                            "id" => $product["id"],
-                        ],
-                    ],
-                ],
-            ];
-        }, $request->products);
+        $products = collect($request->products)->map(fn ($product) => [
+             "quantity" => $product["purchased_quantity"],
+             "price_data" => [
+                 "currency" => "sgd",
+                 "unit_amount_decimal" => $product["price"] * 100,
+                 "product_data" => [
+                     "name" => $product["name"],
+                     "description" => $product["description"],
+                     "images" => array_map(fn ($image) => $image["url"], $product["images"]),
+                     "metadata" => [
+                         "id" => $product["id"],
+                     ],
+                 ],
+             ],
+        ]);
 
-        $checkout_session = Session::create([
+        $checkoutSession = Session::create([
             "line_items" => $products,
             "mode" => "payment",
             "success_url" => "http://localhost:5173/",
             "cancel_url" => "http://localhost:5173/",
-            
         ]);
 
         $order = Order::query()->create([
-            "buyer_id" => $request->buyer_id,
+            "customer_id" => $request->customer_id,
         ]);
 
-        // redirect client to check out session
+        foreach ($request->products as $product) {
+            OrderItem::query()->create([
+                "order_id" => $order->id,
+                "seller_id" => $product["seller_id"],
+                "product_id" => $product["id"],
+            ]);
+            ProductPurchased::dispatchSync([
+                "productId" => $product["id"],
+                "quantity" => $product["purchased_quantity"]
+            ]);
+        }
+
         return response([
-            "message" => "Success",
+            "message" => "Returning checkout session url and order",
             "order" => $order,
-            "url" => $checkout_session->url,
+            "url" => $checkoutSession->url,
         ]);
     }
 }
